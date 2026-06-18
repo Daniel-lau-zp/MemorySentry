@@ -10,6 +10,9 @@ DerivedData/
 xcuserdata/
 *.xcuserstate
 
+# Demo 工程的 .xcodeproj 由 project.yml + xcodegen 生成，不入库
+Example/**/*.xcodeproj
+
 # ===== 依赖 =====
 Pods/
 Carthage/Build/

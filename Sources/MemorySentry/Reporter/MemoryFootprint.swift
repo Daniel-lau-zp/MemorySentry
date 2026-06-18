@@ -6,24 +6,24 @@ import Foundation
 /// 比 `resident_size` 更能反映"App 实际欠系统多少物理内存"。
 /// 同时尝试读取 `limit_bytes_remaining`：进程级内存上限 ≈ phys_footprint + limit_bytes_remaining。
 /// 该字段在部分模拟器 / 旧 iOS 上为 0，调用方应回退到 `ProcessInfo.physicalMemory`。
-enum MemoryFootprint {
+public enum MemoryFootprint {
 
     /// 一次 task_vm_info 读取的关键字段。
-    struct Reading {
+    public struct Reading {
         /// 当前 phys_footprint（字节）。
-        let footprint: UInt64
+        public let footprint: UInt64
         /// 进程剩余可用内存（字节）。配合 footprint 推算进程级上限；为 nil 表示系统未提供。
-        let bytesRemaining: UInt64?
+        public let bytesRemaining: UInt64?
 
         /// 进程级内存上限（字节）。`nil` 表示无法推算（应回退到 ProcessInfo.physicalMemory）。
-        var processLimit: UInt64? {
+        public var processLimit: UInt64? {
             guard let bytesRemaining else { return nil }
             return footprint + bytesRemaining
         }
     }
 
     /// 读取一次 task_vm_info，返回 footprint 与 bytesRemaining。读取失败返回 nil。
-    static func read() -> Reading? {
+    public static func read() -> Reading? {
         var info = task_vm_info_data_t()
         var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
         let result = withUnsafeMutablePointer(to: &info) {
@@ -39,8 +39,8 @@ enum MemoryFootprint {
         return Reading(footprint: UInt64(info.phys_footprint), bytesRemaining: bytesRemaining)
     }
 
-    /// 兼容旧用法：仅返回 phys_footprint（字节）。读取失败返回 nil。
-    static func current() -> UInt64? {
+    /// 仅返回 phys_footprint（字节）。读取失败返回 nil。
+    public static func current() -> UInt64? {
         read()?.footprint
     }
 }

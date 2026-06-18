@@ -227,6 +227,19 @@ final class MyObserver: MemorySentryObserver {
 | `ConsoleMemorySentryObserver` | 开箱即用的 os.log observer |
 | `MemorySnapshot` | `correlations()` / `diagnosticSummary()` / `regionGroups` / `largeRegions` |
 
+## 可执行 Demo
+
+[Example/MemorySentryDemo](Example/MemorySentryDemo/) 是 SwiftUI 单页 Demo，覆盖库的全部核心调用面：实时 footprint / 进程上限 / 占用率读数、一键分配大块内存触发字节阈值与压力告警、字节阈值告警附带的现场快照摘要、手动 `captureSnapshot()` 取证、observer 回调日志。
+
+运行（工程由 [xcodegen](https://github.com/yonaskolb/XcodeGen) 管理，仓库不入库 `.xcodeproj`）：
+
+```sh
+brew install xcodegen
+cd Example/MemorySentryDemo
+xcodegen generate
+open MemorySentryDemo.xcodeproj
+```
+
 ## 目录结构
 
 ```
@@ -243,6 +256,11 @@ Sources/MemorySentry/
 │   └── MemorySnapshot.swift              # 全进程内存现场快照
 └── MetricKitIntegration/
     └── MetricKitCollector.swift          # MetricKit 兜底线
+
+Example/MemorySentryDemo/                 # 可执行 SwiftUI Demo（xcodegen 工程）
+├── project.yml                           # 工程清单
+├── README.md                             # demo 说明 + 运行步骤
+└── Sources/                              # DemoApp / ContentView / EventBridge
 ```
 
 ## 测试
