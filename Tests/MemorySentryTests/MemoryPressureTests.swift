@@ -8,8 +8,7 @@ import XCTest
 /// 4. 边沿迟滞：阈值 0 仅在首次轮询触发一次，不重复告警
 final class MemoryPressureTests: XCTestCase {
 
-    // MARK: - 自适应分档
-
+    // MARK: -
     func testAdaptiveBucketsByTotalMemory() {
         let gb: UInt64 = 1024 * 1024 * 1024
         let tiny = MemoryPressureConfig.adaptive(physicalMemory: 1 * gb)
@@ -29,8 +28,7 @@ final class MemoryPressureTests: XCTestCase {
         XCTAssertEqual(big.criticalRatio, 0.88, accuracy: 0.0001)
     }
 
-    // MARK: - 阈值映射
-
+    // MARK: -
     func testThresholdLookup() {
         let cfg = MemoryPressureConfig(warningRatio: 0.6, criticalRatio: 0.85)
         XCTAssertEqual(cfg.threshold(for: .warning), 0.6)
@@ -42,8 +40,7 @@ final class MemoryPressureTests: XCTestCase {
         XCTAssertEqual(MemoryPressureLevel.allCases, [.critical, .warning])
     }
 
-    // MARK: - 真实链路：把 warning 压到 0 强制触发一次
-
+    // MARK: -
     /// 收集压力告警事件的 spy。
     private final class PressureSpy: MemorySentryObserver, @unchecked Sendable {
         let lock = NSLock()
@@ -93,8 +90,7 @@ final class MemoryPressureTests: XCTestCase {
         }
     }
 
-    // MARK: - 双级独立触发
-
+    // MARK: -
     func testCriticalAndWarningBothFireWhenBothCrossed() {
         let cfg = MemorySentryConfiguration(
             appFootprintThreshold: .max,
@@ -129,8 +125,7 @@ final class MemoryPressureTests: XCTestCase {
         }
     }
 
-    // MARK: - update 重置迟滞
-
+    // MARK: -
     func testUpdateConfigResetsHysteresis() {
         let cfg = MemorySentryConfiguration(
             appFootprintThreshold: .max,

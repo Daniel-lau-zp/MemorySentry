@@ -19,8 +19,7 @@ final class ObserverCallbackTests: XCTestCase {
         }
     }
 
-    // MARK: - 字节阈值真实链路
-
+    // MARK: -
     func testFootprintThresholdFiresOnceOnEdge() {
         // 阈值压到 0：当前 footprint 必然 > 0，应触发；继续轮询不应重复触发（边沿迟滞）。
         let cfg = MemorySentryConfiguration(
@@ -49,8 +48,7 @@ final class ObserverCallbackTests: XCTestCase {
         XCTAssertGreaterThan(spy.events.first?.footprint ?? 0, 0)
     }
 
-    // MARK: - 协议默认空实现可直接调用
-
+    // MARK: -
     func testDefaultEmptyImplementationsAreCallable() {
         final class Bare: MemorySentryObserver, @unchecked Sendable {}
         let bare: MemorySentryObserver = Bare()
@@ -60,8 +58,7 @@ final class ObserverCallbackTests: XCTestCase {
         bare.memorySentry(didReceiveMetricKitPayload: MetricKitEvent(eventType: .memoryWarning, peakMemoryUsage: 0, callStack: [], timeStampBegin: now, timeStampEnd: now))
     }
 
-    // MARK: - ConsoleMemorySentryObserver 覆盖回调不崩溃
-
+    // MARK: -
     func testConsoleObserverHandlesAllCallbacks() {
         let console = ConsoleMemorySentryObserver()
         let now = Date()
