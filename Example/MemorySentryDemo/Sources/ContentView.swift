@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var allocatedMB: Int = 0
     @State private var manualSnapshot: String?
     @State private var blocks: [Data] = []
+    @State private var moduleEntered = false
 
     var body: some View {
         NavigationView {
@@ -40,6 +41,25 @@ struct ContentView: View {
                         Text("释放全部")
                     }
                     Text("默认配置：footprintThreshold=200MB，跨过即触发；压力告警走设备自适应分档。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section("增量归因线（opt-in 模块注册）") {
+                    Button(moduleEntered ? "leaveModule(\"ImageCache\")" : "enterModule(\"ImageCache\")") {
+                        if moduleEntered {
+                            MemorySentry.shared.leaveModule("ImageCache")
+                        } else {
+                            MemorySentry.shared.enterModule("ImageCache", metadata: ["v": "2.1"])
+                        }
+                        moduleEntered.toggle()
+                    }
+                    Button("注册模块后分配 50MB（制造嫌疑）") {
+                        MemorySentry.shared.enterModule("ImageCache", metadata: ["v": "2.1"])
+                        moduleEntered = true
+                        allocate(megabytes: 50)
+                    }
+                    Text("当前模块：\(moduleEntered ? "ImageCache（已注册）" : "无")。注册后涨幅 > 30MB → suspectedModuleGrowth（嫌疑含 ImageCache）；不注册直接涨 → unattributedGrowth。启动 3s 内只更新 baseline 不报。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

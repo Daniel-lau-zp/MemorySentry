@@ -28,6 +28,19 @@ public final class MemorySentry: @unchecked Sendable {
     /// MetricKit 兜底线采集器。`enableMetricKitIntegration` 时懒装配。
     private var metricKitCollector: MetricKitCollector?
 
+    /// 模块注册表（opt-in 增量归因线）。独立锁，enter/leave 低开销。
+    private let moduleRegistry = ModuleRegistry()
+    /// 上报前补充额外信息的闭包。受 `lock` 保护。
+    private var growthContextProvider: GrowthContextProvider?
+    /// 是否调用过 `enterModule`。一旦置位不回退——用于激活判据，避免 enter 后 leave 表空被误判未激活。受 `lock` 保护。
+    private var hasEverRegisteredModule = false
+    /// 上一拍 footprint（滑动 baseline）。受 `lock` 保护。
+    private var lastFootprint: UInt64?
+    /// 上一拍轮询时刻（嫌疑区间下界）。受 `lock` 保护。
+    private var lastPollTimestamp: Date?
+    /// `startMonitoring()` 时刻（启动宽限窗口起点）。受 `lock` 保护。
+    private var monitoringStartedAt: Date?
+
     private let log = OSLog(subsystem: "com.memorysentry", category: "MemorySentry")
 
     public init(
@@ -49,6 +62,8 @@ public final class MemorySentry: @unchecked Sendable {
         // 阈值变更后清除上一拍迟滞，让下一轮轮询按新阈值重新判定边沿。
         lastAppEventFired = false
         pressureFired.removeAll()
+        // 等价重启增量归因线的滑动状态，避免跨配置变更算出脏增量。
+        resetGrowthStateLocked()
         lock.unlock()
 
         restartPollingIfNeeded()
@@ -66,6 +81,12 @@ public final class MemorySentry: @unchecked Sendable {
 
     /// 启动整体内存轮询。重复调用会重建定时器。
     public func startMonitoring() {
+        lock.lock()
+        // 启动宽限窗口起点 + 复位滑动 baseline：窗口内只更新 baseline 不上报，排除启动期爬升。
+        monitoringStartedAt = Date()
+        lastFootprint = nil
+        lastPollTimestamp = nil
+        lock.unlock()
         restartPollingIfNeeded()
     }
 
@@ -74,6 +95,35 @@ public final class MemorySentry: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         pollingTimer?.cancel()
         pollingTimer = nil
+        resetGrowthStateLocked()
+    }
+
+    // MARK: - 增量归因线（opt-in 模块注册）
+    /// 标记一个模块进入存活状态。任意线程可调，低开销。同名覆盖（刷新时间戳 + metadata）。
+    ///
+    /// 这是对零侵入的 opt-in 叠加层；不调用则行为与现状完全一致。
+    public func enterModule(_ name: String, metadata: [String: String] = [:]) {
+        moduleRegistry.enter(name, metadata: metadata, at: Date())
+        lock.lock(); hasEverRegisteredModule = true; lock.unlock()
+    }
+
+    /// 标记一个模块离开（视为已释放）。任意线程可调，幂等。
+    public func leaveModule(_ name: String) {
+        moduleRegistry.leave(name)
+    }
+
+    /// 设置增量归因上报的额外信息提供闭包。传 `nil` 清除。
+    ///
+    /// 闭包在上报的串行回调队列上、分发 observer 之前调用（此时不持有任何内部锁）。须快速返回、勿阻塞。
+    public func setGrowthContextProvider(_ provider: GrowthContextProvider?) {
+        lock.lock(); growthContextProvider = provider; lock.unlock()
+    }
+
+    /// 复位增量归因线的滑动状态。已持有 `lock` 时调用。
+    private func resetGrowthStateLocked() {
+        lastFootprint = nil
+        lastPollTimestamp = nil
+        monitoringStartedAt = nil
     }
 
     /// 立即采集一次全进程内存现场快照。可在任意时机手动取证。
@@ -138,6 +188,7 @@ public final class MemorySentry: @unchecked Sendable {
     private func checkAppFootprint() {
         guard let reading = MemoryFootprint.read() else { return }
         let footprint = reading.footprint
+        let now = Date()
 
         lock.lock()
         let threshold = configuration.appFootprintThreshold
@@ -158,7 +209,11 @@ public final class MemorySentry: @unchecked Sendable {
             config: pressureCfg
         )
 
-        let observerList = (shouldFireAppEvent || !pressureFires.isEmpty) ? observersSnapshotLocked() : []
+        // 增量归因线（opt-in，短路保护）：未激活时整段不进入，零开销零行为变化。
+        let growthPlan = evaluateGrowthLocked(footprint: footprint, now: now)
+
+        let needObservers = shouldFireAppEvent || !pressureFires.isEmpty || growthPlan != nil
+        let observerList = needObservers ? observersSnapshotLocked() : []
         lock.unlock()
 
         // 快照在锁外采集：region 遍历较重，不阻塞外部调用。
@@ -184,6 +239,87 @@ public final class MemorySentry: @unchecked Sendable {
             )
             for ob in observerList { ob.memorySentry(didCrossMemoryPressure: event) }
         }
+
+        // 增量归因上报：registry 快照 / contextProvider 都在锁外，避免与接入方闭包构成死锁。
+        if let plan = growthPlan {
+            let live = moduleRegistry.liveSnapshot()
+            // 嫌疑 = 区间内新增且仍存活：半开区间 lower < registeredAt <= upper，避免与上一拍重复归因。
+            let suspected = live.filter { plan.lowerBound < $0.registeredAt && $0.registeredAt <= plan.upperBound }
+            let kind: GrowthReportKind = suspected.isEmpty ? .unattributedGrowth : .suspectedModuleGrowth
+            let context = GrowthContext(
+                kind: kind,
+                liveModules: live,
+                suspectedModules: suspected,
+                footprint: plan.footprint,
+                delta: plan.delta
+            )
+            let extra = plan.provider?(context) ?? [:]
+            let event = MemoryGrowthEvent(
+                kind: kind,
+                footprint: plan.footprint,
+                delta: plan.delta,
+                deltaThreshold: plan.deltaThreshold,
+                liveModules: live,
+                suspectedModules: suspected,
+                context: extra
+            )
+            for ob in observerList { ob.memorySentry(didDetectMemoryGrowth: event) }
+        }
+    }
+
+    /// 锁内决策传到锁外执行的载体（与 `pressureFires` 同模式）。仅在确定要上报时非 nil。
+    private struct GrowthPlan {
+        let delta: UInt64
+        let deltaThreshold: UInt64
+        let lowerBound: Date
+        let upperBound: Date
+        let footprint: UInt64
+        let provider: GrowthContextProvider?
+    }
+
+    /// 评估增量归因线。已持有 `lock` 时调用。
+    ///
+    /// - 未激活（无阈值 / 无 provider / 从未注册模块）→ 整段短路，返回 nil。
+    /// - 激活时**无条件滑动 baseline**（`lastFootprint` / `lastPollTimestamp` 每拍更新，含启动窗口内）：
+    ///   启动期陡升被逐拍切分，窗口结束首个有效拍的增量只是"相邻一拍差"，不含整段启动累积涨幅。
+    /// - 仅当有上一拍、阈值已配置、涨幅为正、且已过启动窗口、增量超阈值时，返回 `GrowthPlan` 触发上报。
+    private func evaluateGrowthLocked(footprint: UInt64, now: Date) -> GrowthPlan? {
+        let active = configuration.growthDeltaThreshold != nil
+            || growthContextProvider != nil
+            || hasEverRegisteredModule
+        guard active else { return nil }
+
+        let prevFootprint = lastFootprint
+        let prevPollTs = lastPollTimestamp
+        let startedAt = monitoringStartedAt
+        let provider = growthContextProvider
+
+        // (A) 无条件滑动 baseline —— 窗口内也更新，这是消化启动涨幅的关键。
+        lastFootprint = footprint
+        lastPollTimestamp = now
+
+        // (B) 首拍无上一拍、未配阈值、或非增长 → 只填 baseline 不上报。
+        guard let prev = prevFootprint,
+              let deltaThreshold = configuration.growthDeltaThreshold,
+              footprint > prev else { return nil }
+        let delta = footprint - prev
+
+        // (C) 启动宽限窗口内：只滑动 baseline，不上报。
+        if let startedAt, now.timeIntervalSince(startedAt) < configuration.startupGracePeriod {
+            return nil
+        }
+        guard delta > deltaThreshold else { return nil }
+
+        // (D) 嫌疑区间下界 = 上一拍轮询时刻；首个判定拍 prevPollTs 可能为 nil，用 startedAt 兜底。
+        let lower = prevPollTs ?? startedAt ?? now
+        return GrowthPlan(
+            delta: delta,
+            deltaThreshold: deltaThreshold,
+            lowerBound: lower,
+            upperBound: now,
+            footprint: footprint,
+            provider: provider
+        )
     }
 
     /// 评估当前 footprint / limit 是否跨越压力阈值。

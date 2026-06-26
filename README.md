@@ -1,12 +1,12 @@
 # MemorySentry
 
-> 零侵入的全局内存监视器（**iOS-only**）—— App 整体字节阈值告警 · 内存压力分级告警 · 现场快照取证 · MetricKit 兜底。
+> 零侵入的全局内存监视器（**iOS-only**）—— App 整体字节阈值告警 · 内存压力分级告警 · 现场快照取证 · MetricKit 兜底 · 模块增量归因（opt-in）。
 
 ![platform](https://img.shields.io/badge/platform-iOS%2015%2B-lightgrey)
 ![swift](https://img.shields.io/badge/swift-5.9-orange)
 ![spm](https://img.shields.io/badge/SPM-supported-green)
 ![cocoapods](https://img.shields.io/badge/CocoaPods-supported-green)
-![version](https://img.shields.io/badge/version-1.0.0-blue)
+![version](https://img.shields.io/badge/version-1.1.0-blue)
 
 ## 设计理念
 
@@ -19,6 +19,8 @@
 2. **内存压力分级告警** —— 同一轮询里按设备总内存的百分比双级触发（warning / critical），分档自适应。
 3. **MetricKit 兜底** —— 订阅系统次日交付的 OOM / 内存峰值诊断，兜常驻轮询采不到的进程消亡盲区。
 
+> ℹ️ **1.1.0**：新增 opt-in 增量归因线（模块注册 + 相邻两拍涨幅归因），作为零侵入的可选叠加层——不接入则行为与 1.0.0 完全一致。详见下文「增量归因线」与 [CHANGELOG](CHANGELOG.md)。
+>
 > ℹ️ 1.0.0 是一次重构：移除了所有需要业务登记的 API（`track(bytes:)` / `@MemoryTracked` / `trackLifetime` / 单次申请超限 / 泄漏检测线），统一收敛到零侵入路径。如需对象级泄漏定位，请使用 Instruments（Allocations / Leaks）或 FBRetainCycleDetector。
 
 ---
@@ -178,6 +180,51 @@ MemorySentry.shared.disableMetricKitIntegration()
 - **不保证 100% 覆盖**：用户长期不开 App / 卸载，该次报告就丢了。
 - **OOM 判据保守**：仅 `EXC_RESOURCE` + `SIGKILL` 判为 OOM，宁可漏报不误报。
 
+### 5. 增量归因线（可选叠加层 / opt-in）
+
+> ⚠️ 这是**对零侵入的补充，而非回退**——不接入则行为与上面三条线完全一致、零开销。只有设了 `growthDeltaThreshold`、调用过 `enterModule`、或设了 `contextProvider` 才激活。
+
+回答的问题：**「这次内存上涨，时间上是否和某个刚加载的模块相关？」** 模块在起始时 `enterModule` 打标记、销毁时 `leaveModule` 删标记；轮询里对比**相邻两拍** footprint 涨幅，超过 `growthDeltaThreshold` 即上报，并把「该涨幅区间内新注册且仍未释放的模块」标为**嫌疑**。
+
+> ⚠️ 嫌疑模块是**时间相关性线索，不证明因果**——只说明该模块恰在涨幅区间内注册，不代表内存就是它分配的。对象级定位仍需 Instruments。
+
+```swift
+// 1. 配置：开启增量归因线
+var cfg = MemorySentry.shared.configuration
+cfg.growthDeltaThreshold = 30 * 1024 * 1024   // 相邻两拍涨幅 > 30MB 即上报
+cfg.startupGracePeriod   = 5.0                 // 启动后 5s 内只更新 baseline 不上报
+MemorySentry.shared.update(configuration: cfg)
+
+// 2.（可选）上报时补充全局额外信息
+MemorySentry.shared.setGrowthContextProvider { ctx in
+    // ctx.kind / ctx.liveModules / ctx.suspectedModules / ctx.footprint / ctx.delta
+    ["screen": currentScreenName, "user": userTier]
+}
+
+// 3. 在模块生命周期两端打标记（任意线程，低开销）
+MemorySentry.shared.enterModule("ImageCache", metadata: ["v": "2.1"])
+// ... 模块运行 ...
+MemorySentry.shared.leaveModule("ImageCache")
+
+// 4. observer 接收
+func memorySentry(didDetectMemoryGrowth event: MemoryGrowthEvent) {
+    switch event.kind {
+    case .suspectedModuleGrowth: // 涨幅区间内有新增模块
+        print(event.suspectedModules.map(\.name))
+    case .unattributedGrowth:    // 涨幅超阈但无新增模块（仍上报）
+        break
+    }
+    // event.delta / .footprint / .liveModules / .context
+}
+```
+
+**判定行为约束**：
+- **滑动上一拍 baseline**：`delta = 本拍 footprint − 上一拍 footprint`，每拍滑动，不是相对某个固定基准。
+- **启动宽限窗口**：`startMonitoring()` 起 `startupGracePeriod` 秒内**仍逐拍更新 baseline 但不上报**——排除系统/业务集中初始化的爬升。因为 baseline 逐拍滑动，窗口结束首拍的增量只是「相邻一拍差」，不含整段启动累积涨幅。
+- **无嫌疑也上报**：窗口外只要单拍涨幅超阈值就上报。区间内无新增模块时 `kind = .unattributedGrowth`、`suspectedModules` 为空，但 `liveModules`（当前存活全集）照常带出。
+- **`liveModules` 与 `suspectedModules` 是两个独立字段**：前者是当前所有未释放模块，后者是其中「本次涨幅区间内新增」的子集，可为空。
+- **双通道额外信息**：注册时 `metadata`（静态）+ 上报时 `contextProvider`（动态，入参含存活/嫌疑模块与上报类型）。
+
 ## 自定义观察者
 
 ```swift
@@ -185,10 +232,11 @@ final class MyObserver: MemorySentryObserver {
     func memorySentry(didExceedAppFootprint event: AppFootprintEvent) { }
     func memorySentry(didCrossMemoryPressure event: MemoryPressureEvent) { }
     func memorySentry(didReceiveMetricKitPayload event: MetricKitEvent) { }
+    func memorySentry(didDetectMemoryGrowth event: MemoryGrowthEvent) { } // opt-in 增量归因线
 }
 ```
 
-三个回调全部有默认空实现，按需覆盖即可。开箱即用的 `ConsoleMemorySentryObserver` 已覆盖全部回调（含排查建议文案）。
+四个回调全部有默认空实现，按需覆盖即可。开箱即用的 `ConsoleMemorySentryObserver` 已覆盖全部回调（含排查建议文案）。
 
 > 🧵 回调在监视内部的串行队列触发，不保证主线程；observer 若要操作 UI 需自行切回主线程。
 
@@ -202,7 +250,7 @@ final class MyObserver: MemorySentryObserver {
 | App 被后台 OOM 强杀 | ❌ 进程已亡 | ❌ | ❌ | ✅（次日） |
 
 **本模块不做**：
-- 不定位"具体哪个对象 / 调用栈造成的内存增长"——那需要 Instruments（Allocations / Leaks）或 MetricKit。
+- 不定位"具体哪个对象 / 调用栈造成的内存增长"——那需要 Instruments（Allocations / Leaks）或 MetricKit。增量归因线只给「涨幅区间内新增模块」的**时间相关性线索**，不替代对象级定位。
 - 不做对象级泄漏检测、循环引用检测——前者用 Instruments，后者用 Memory Graph / FBRetainCycleDetector。
 
 本模块的定位是"线上常驻、低开销、零侵入、能按设备级风险给出实时分级告警，并在跨阈值时自动留证"。
@@ -217,13 +265,19 @@ final class MyObserver: MemorySentryObserver {
 | `update(configuration:)` | 更新配置；会按新轮询间隔重建定时器、清迟滞 |
 | `captureSnapshot(largeRegionThreshold:)` | 手动采集内存现场快照 |
 | `enableMetricKitIntegration()` / `disableMetricKitIntegration()` | 启停 MetricKit 兜底（幂等） |
-| `MemorySentryConfiguration` | 字节阈值 / 轮询间隔 / 快照开关 / 压力配置 / MetricKit 标记 |
+| `enterModule(_:metadata:)` / `leaveModule(_:)` | 【opt-in】模块起始/销毁打标记，供增量归因线圈定嫌疑 |
+| `setGrowthContextProvider(_:)` | 【opt-in】设置上报时的额外信息提供闭包（传 nil 清除） |
+| `MemorySentryConfiguration` | 字节阈值 / 轮询间隔 / 快照开关 / 压力配置 / MetricKit 标记 / 增量阈值 / 启动窗口 |
 | `MemoryPressureConfig` / `.adaptive(physicalMemory:)` | warning / critical 比例；按设备总内存自动分档 |
 | `MemoryPressureLevel` | `.warning` / `.critical`；`allCases` 上报顺序 critical 先 |
 | `MemoryPressureEvent` | level / footprint / limit / ratio / threshold |
 | `AppFootprintEvent` | footprint / threshold / snapshot |
 | `MetricKitEvent` | eventType（.oom / .memoryWarning） / peakMemoryUsage / callStack / 时段 |
-| `MemorySentryObserver` | 事件观察者协议（3 回调，全默认空实现） |
+| `MemoryGrowthEvent` | kind / footprint / delta / deltaThreshold / liveModules / suspectedModules / context |
+| `GrowthReportKind` | `.suspectedModuleGrowth` / `.unattributedGrowth` |
+| `GrowthContext` | contextProvider 入参：kind / liveModules / suspectedModules / footprint / delta |
+| `RegisteredModule` | name / registeredAt / metadata |
+| `MemorySentryObserver` | 事件观察者协议（4 回调，全默认空实现） |
 | `ConsoleMemorySentryObserver` | 开箱即用的 os.log observer |
 | `MemorySnapshot` | `correlations()` / `diagnosticSummary()` / `regionGroups` / `largeRegions` |
 
@@ -245,11 +299,13 @@ open MemorySentryDemo.xcodeproj
 ```
 Sources/MemorySentry/
 ├── Core/
-│   ├── MemorySentry.swift                # 监视中心主类（门面装配三条线）
+│   ├── MemorySentry.swift                # 监视中心主类（门面装配各条线）
 │   ├── MemorySentryConfiguration.swift   # 配置 + 内存压力分档
-│   └── MemoryEvent.swift                 # 3 类事件：footprint / pressure / metricKit
+│   ├── MemoryEvent.swift                 # 3 类事件：footprint / pressure / metricKit
+│   ├── MemoryGrowthEvent.swift           # 增量归因事件 + 上报类型 + contextProvider 类型
+│   └── ModuleRegistry.swift              # opt-in 模块注册表（独立锁）
 ├── Observer/
-│   ├── MemorySentryObserver.swift        # 观察者协议（3 回调，默认空实现）
+│   ├── MemorySentryObserver.swift        # 观察者协议（4 回调，默认空实现）
 │   └── ConsoleMemorySentryObserver.swift # os.log observer
 ├── Reporter/
 │   ├── MemoryFootprint.swift             # phys_footprint + 进程级上限读取
@@ -271,4 +327,4 @@ xcodebuild -scheme MemorySentry \
   test
 ```
 
-覆盖：footprint 读取、快照采集与大区域捕获、归因推测置信度、内存压力分级告警自适应分档 / 边沿迟滞 / 双级独立触发、字节阈值边沿触发、MetricKit 订阅幂等、observer 默认空实现。
+覆盖：footprint 读取、快照采集与大区域捕获、归因推测置信度、内存压力分级告警自适应分档 / 边沿迟滞 / 双级独立触发、字节阈值边沿触发、MetricKit 订阅幂等、observer 默认空实现、增量归因线（默认短路 / 启动窗口抑制 / 嫌疑归因 / 无嫌疑也报 / leave 剔除 / contextProvider 透传）。

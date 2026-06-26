@@ -2,12 +2,13 @@ import Foundation
 
 /// MemorySentry 配置。
 ///
-/// 三条独立监控线：
+/// 三条独立监控线 + 一条 opt-in 归因线：
 /// - **App 整体字节阈值**（`appFootprintThreshold`）：业务自定的硬红线。
 /// - **内存压力分级告警**（`memoryPressureConfig`）：按设备总内存自适应分档，warning / critical 双级。
 /// - **MetricKit 兜底**：通过门面 `enableMetricKitIntegration()` 开启。
+/// - **增量归因线**（`growthDeltaThreshold`，opt-in）：相邻两拍涨幅超阈值时上报，附带嫌疑模块（时间相关性）。
 ///
-/// 前两条共用 `appPollingInterval` 驱动；`appFootprintThreshold` 与百分比压力告警正交，可同时启用。
+/// 前两条与增量归因线共用 `appPollingInterval` 驱动；`appFootprintThreshold` 与百分比压力告警正交，可同时启用。
 public struct MemorySentryConfiguration: Sendable {
 
     /// App 整体内存（phys_footprint）字节阈值。超过即上报 `didExceedAppFootprint`。
@@ -30,13 +31,23 @@ public struct MemorySentryConfiguration: Sendable {
     /// 是否已启用 MetricKit 兜底线。默认关闭，由门面 `enableMetricKitIntegration()` 置位。
     public var metricKitEnabled: Bool
 
+    /// 【增量归因线，opt-in】相邻两拍 footprint 涨幅超过此字节数即上报 `didDetectMemoryGrowth`。
+    /// `nil` = 关闭增量归因线（默认）。设为非 `nil` 即激活该线；不接入则行为与零侵入路径完全一致。
+    public var growthDeltaThreshold: UInt64?
+
+    /// 【增量归因线】启动宽限窗口（秒）。`startMonitoring()` 起计。
+    /// 窗口内：仍逐拍更新滑动 baseline，但不产出归因上报——排除系统 / 业务集中初始化的内存爬升。默认 5s。
+    public var startupGracePeriod: TimeInterval
+
     public init(
         appFootprintThreshold: UInt64 = 500 * 1024 * 1024,
         appPollingInterval: TimeInterval? = 1.0,
         capturesSnapshotOnThreshold: Bool = true,
         largeRegionThreshold: UInt64 = 10 * 1024 * 1024,
         memoryPressureConfig: MemoryPressureConfig = .adaptive(),
-        metricKitEnabled: Bool = false
+        metricKitEnabled: Bool = false,
+        growthDeltaThreshold: UInt64? = nil,
+        startupGracePeriod: TimeInterval = 5.0
     ) {
         self.appFootprintThreshold = appFootprintThreshold
         self.appPollingInterval = appPollingInterval
@@ -44,6 +55,8 @@ public struct MemorySentryConfiguration: Sendable {
         self.largeRegionThreshold = largeRegionThreshold
         self.memoryPressureConfig = memoryPressureConfig
         self.metricKitEnabled = metricKitEnabled
+        self.growthDeltaThreshold = growthDeltaThreshold
+        self.startupGracePeriod = startupGracePeriod
     }
 
     /// 默认配置：500MB 字节红线、1s 轮询、压力告警按设备自适应、超阈值采集快照。

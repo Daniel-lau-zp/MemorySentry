@@ -55,6 +55,28 @@ public final class ConsoleMemorySentryObserver: MemorySentryObserver, @unchecked
         }
     }
 
+    public func memorySentry(didDetectMemoryGrowth event: MemoryGrowthEvent) {
+        let suspects = event.suspectedModules.map { $0.name }.joined(separator: ", ")
+        switch event.kind {
+        case .suspectedModuleGrowth:
+            logger.error("""
+            [MemorySentry] 内存增量归因 delta=\(Self.mb(event.delta), privacy: .public)MB \
+            footprint=\(Self.mb(event.footprint), privacy: .public)MB \
+            threshold=\(Self.mb(event.deltaThreshold), privacy: .public)MB \
+            嫌疑模块=[\(suspects, privacy: .public)] 存活模块数=\(event.liveModules.count, privacy: .public) \
+            建议：核对嫌疑模块在该区间的内存分配（仅时间相关性，非因果），必要时用 Instruments 定位。
+            """)
+        case .unattributedGrowth:
+            logger.error("""
+            [MemorySentry] 内存增量无归因 delta=\(Self.mb(event.delta), privacy: .public)MB \
+            footprint=\(Self.mb(event.footprint), privacy: .public)MB \
+            threshold=\(Self.mb(event.deltaThreshold), privacy: .public)MB \
+            存活模块数=\(event.liveModules.count, privacy: .public) \
+            建议：区间内无新增模块，涨幅可能来自既有模块或系统分配，可用现场快照 / Instruments 深挖。
+            """)
+        }
+    }
+
     private static func mb(_ bytes: UInt64) -> String {
         String(format: "%.1f", Double(bytes) / 1024 / 1024)
     }

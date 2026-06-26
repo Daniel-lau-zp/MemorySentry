@@ -10,10 +10,14 @@ public protocol MemorySentryObserver: AnyObject, Sendable {
     func memorySentry(didCrossMemoryPressure event: MemoryPressureEvent)
     /// MetricKit 兜底线收到系统诊断 / 指标负载（OOM 或内存峰值）时触发。
     func memorySentry(didReceiveMetricKitPayload event: MetricKitEvent)
+    /// 【增量归因线，opt-in】相邻两拍 footprint 涨幅超增量阈值时触发（启动宽限窗口之后）。
+    /// 携带嫌疑模块（时间相关性线索）与接入方补充信息。
+    func memorySentry(didDetectMemoryGrowth event: MemoryGrowthEvent)
 }
 
 public extension MemorySentryObserver {
     func memorySentry(didExceedAppFootprint event: AppFootprintEvent) {}
     func memorySentry(didCrossMemoryPressure event: MemoryPressureEvent) {}
     func memorySentry(didReceiveMetricKitPayload event: MetricKitEvent) {}
+    func memorySentry(didDetectMemoryGrowth event: MemoryGrowthEvent) {}
 }

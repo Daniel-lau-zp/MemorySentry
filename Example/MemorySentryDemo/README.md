@@ -10,6 +10,7 @@ MemorySentry 的可执行接入演示（SwiftUI App）。
   - 内存压力分级告警（`didCrossMemoryPressure`，warning / critical）
   - 字节阈值告警附带的全进程现场快照（`MemorySnapshot.diagnosticSummary`）
 - 手动 `captureSnapshot()` 取证按钮
+- **增量归因线（opt-in）**：`enterModule` / `leaveModule` 打标记 + 「注册模块后分配 50MB」按钮，触发 `didDetectMemoryGrowth`——区分 `suspectedModuleGrowth`（嫌疑含 ImageCache）与 `unattributedGrowth`（无新增模块），启动 3s 窗口内不上报
 - 事件日志面板（observer 回调实时展示，最近 30 条）
 
 ## 运行

@@ -54,4 +54,15 @@ extension EventBridge: MemorySentryObserver {
             self.appendLog(line)
         }
     }
+
+    nonisolated func memorySentry(didDetectMemoryGrowth event: MemoryGrowthEvent) {
+        let icon = event.kind == .suspectedModuleGrowth ? "🧩" : "📈"
+        let suspects = event.suspectedModules.map { $0.name }.joined(separator: ", ")
+        let suspectText = suspects.isEmpty ? "无嫌疑" : "嫌疑=[\(suspects)]"
+        let ctxText = event.context.isEmpty ? "" : " ctx=\(event.context)"
+        let line = "\(icon) growth +\(Self.mb(event.delta))MB (footprint=\(Self.mb(event.footprint))MB) \(suspectText) 存活=\(event.liveModules.count)\(ctxText)"
+        Task { @MainActor in
+            self.appendLog(line)
+        }
+    }
 }
